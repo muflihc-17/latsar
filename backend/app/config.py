@@ -7,7 +7,7 @@ class Settings(BaseSettings):
 
     # Groq
     groq_api_key: str = ""
-    groq_model: str = "llama-3.1-8b-instant"
+    groq_model: str = "meta-llama/llama-prompt-guard-2-22m"
 
     # App
     app_host: str = "0.0.0.0"
