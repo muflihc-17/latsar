@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.database import engine
 from app.models import Base
-from app.routers import news, agent
+from app.routers import news, agent, watchlist, reports
 from app.services.scheduler import start_scheduler, stop_scheduler
 from app.config import get_settings
 import logging
@@ -37,8 +37,8 @@ app = FastAPI(
 # CORS untuk Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_url, "http://localhost:3000"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -46,6 +46,8 @@ app.add_middleware(
 # Routers
 app.include_router(news.router)
 app.include_router(agent.router)
+app.include_router(watchlist.router)
+app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
 
 @app.get("/")
 def root():

@@ -6,8 +6,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://muflihulchoir@localhost:5432/sansidam_db"
 
     # Groq
-    groq_api_key: str = ""
-    groq_model: str = "meta-llama/llama-prompt-guard-2-22m"
+    groq_api_key: str
+    groq_model: str = "llama-3.1-8b-instant"
 
     # App
     app_host: str = "0.0.0.0"

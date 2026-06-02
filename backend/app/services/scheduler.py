@@ -2,7 +2,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from app.database import SessionLocal
 from app.services.gnews_service import crawl_and_enqueue
-from app.services.openai_service import analyze_single_news
+from app.services.openai_service import fast_classify
 from app.models import News
 from app.config import get_settings
 import logging
@@ -12,65 +12,114 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 scheduler = AsyncIOScheduler()
 
-_job_running = False
+_crawl_running = False     # True hanya saat crawl sedang berjalan
+_classify_running = False  # True hanya saat classifier sedang berjalan
 
-async def analyzer_worker(queue: asyncio.Queue, db):
+
+async def classifier_worker(queue: asyncio.Queue):
     """
-    Worker yang terus membaca dari queue dan menganalisis berita satu per satu.
-    Berhenti ketika menerima sinyal None dari crawler.
+    Worker yang membaca dari queue dan menjalankan fast_classify.
+    Hanya menyimpan berita NEGATIF ke DB.
+    Berhenti saat menerima sinyal None dari crawler.
     """
-    total_analyzed = 0
-    while True:
-        news_id = await queue.get()
+    global _classify_running
+    _classify_running = True
+    db = SessionLocal()
+    try:
+        total_classified = 0
+        total_saved = 0
 
-        # Sinyal selesai dari crawler
-        if news_id is None:
-            logger.info(f"✅ Analyzer selesai: {total_analyzed} berita dianalisis")
-            break
+        while True:
+            news_id = await queue.get()
 
-        # Ambil berita dari DB
-        news = db.query(News).filter(News.id == news_id).first()
-        if not news:
-            continue
+            if news_id is None:
+                logger.info(f"✅ Classifier selesai: {total_classified} diklasifikasi, {total_saved} disimpan (negatif)")
+                break
 
-        logger.info(f"🤖 Menganalisis: '{news.title[:60]}'...")
-        success = await analyze_single_news(db, news)
+            news = db.query(News).filter(News.id == news_id).first()
+            if not news:
+                continue
 
-        if success:
-            total_analyzed += 1
-            logger.info(f"✅ [{total_analyzed}] Selesai → tampil di dashboard")
+            success = await fast_classify(db, news)
+            if success:
+                total_classified += 1
+                # Cek apakah berita tersimpan sebagai negatif
+                from app.models import NewsAnalysis
+                if db.query(NewsAnalysis).filter(NewsAnalysis.news_id == news_id).first():
+                    total_saved += 1
 
-        # Jeda ringan antar analisis agar tidak spam API berlebihan (30 detik untuk Groq free tier)
-        await asyncio.sleep(30)
+            # Pastikan transaksi ditutup sebelum tidur panjang agar tidak mengunci database (pool exhaustion/deadlock)
+            db.commit()
 
-async def job_crawl_and_analyze():
+            # Jeda agar tidak terkena rate limit Groq (1 menit per berita)
+            await asyncio.sleep(60)
+    except Exception as e:
+        logger.error(f"Error di classifier_worker: {e}")
+    finally:
+        db.close()
+        _classify_running = False
+
+
+async def job_crawl_and_classify():
     """
-    Jalankan crawler dan analyzer secara PARALEL menggunakan asyncio Queue.
-    Crawler kirim berita → Queue → Analyzer langsung proses.
+    Pipeline: Crawling → Fast Classify → Simpan hanya negatif.
+    Deep profiling hanya dilakukan on-demand oleh operator.
     """
-    global _job_running
-    if _job_running:
-        logger.info("⏭ Job sebelumnya masih berjalan, skip.")
+    global _crawl_running
+    if _crawl_running:
+        logger.info("⏭ Job crawl sebelumnya masih berjalan, skip.")
         return
 
-    _job_running = True
+    _crawl_running = True
     db = SessionLocal()
 
     try:
         queue = asyncio.Queue()
-        logger.info("🚀 Memulai crawling + analisis paralel...")
+        logger.info("🚀 Memulai crawling + fast classify...")
 
-        # Jalankan crawler dan analyzer secara bersamaan
-        await asyncio.gather(
-            crawl_and_enqueue(db, queue),  # Crawler: crawl & isi queue
-            analyzer_worker(queue, db),    # Analyzer: langsung proses dari queue
-        )
+        # Jalankan classifier sebagai background task (tidak ditunggu)
+        # _classify_running akan dikelola oleh classifier_worker sendiri
+        asyncio.create_task(classifier_worker(queue))
+
+        # Tunggu hanya proses crawling
+        await crawl_and_enqueue(db, queue)
 
     except Exception as e:
-        logger.error(f"❌ Error: {e}")
+        logger.error(f"❌ Error pipeline: {e}")
     finally:
         db.close()
-        _job_running = False
+        _crawl_running = False
+
+
+async def run_crawl_only():
+    """
+    Crawl manual: hanya jalankan crawling, classifier jalan terpisah.
+    Tidak diblokir meski classifier dari sesi sebelumnya masih berjalan.
+    """
+    global _crawl_running
+    if _crawl_running:
+        logger.info("⏭ Crawl sedang berjalan, skip crawl manual.")
+        return
+
+    _crawl_running = True
+    db = SessionLocal()
+
+    try:
+        queue = asyncio.Queue()
+        logger.info("🔄 Crawl manual dimulai...")
+        # Sama seperti jadwal otomatis, classifier dilepas ke background
+        asyncio.create_task(classifier_worker(queue))
+        await crawl_and_enqueue(db, queue)
+    except Exception as e:
+        logger.error(f"❌ Error crawl manual: {e}")
+    finally:
+        db.close()
+        _crawl_running = False
+
+
+def is_crawl_running() -> bool:
+    return _crawl_running
+
 
 async def job_daily_report():
     logger.info("📋 Membuat laporan harian...")
@@ -84,12 +133,13 @@ async def job_daily_report():
     finally:
         db.close()
 
+
 def start_scheduler():
     scheduler.add_job(
-        job_crawl_and_analyze,
+        job_crawl_and_classify,
         trigger=IntervalTrigger(minutes=settings.crawl_interval_minutes),
-        id="crawl_analyze",
-        name="Crawl & Analyze Parallel",
+        id="crawl_classify",
+        name="Crawl & Fast Classify",
         replace_existing=True,
     )
     scheduler.add_job(
@@ -102,6 +152,7 @@ def start_scheduler():
     )
     scheduler.start()
     logger.info(f"🚀 Scheduler aktif — crawling tiap {settings.crawl_interval_minutes} menit")
+
 
 def stop_scheduler():
     if scheduler.running:

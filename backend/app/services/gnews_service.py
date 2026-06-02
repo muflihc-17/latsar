@@ -12,10 +12,22 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=2)
 
 TOPIC_KEYWORDS = [
-    "MBG", "makan bergizi gratis", "bencana", "banjir", "longsor",
-    "gempa", "kriminal", "keamanan", "demo", "unjuk rasa", "konflik",
-    "korupsi", "investasi", "infrastruktur", "jalan", "jembatan",
-    "pilkada", "politik", "TNI", "Polri", "narkoba", "kebakaran", "kecelakaan",
+    # MBG
+    "MBG", "makan bergizi gratis", "keracunan mbg", "sppg",
+    # KDMP (Koperasi Desa Merah Putih)
+    "KDMP", "koperasi desa merah putih", "kopdes",
+    # Jembatan Garuda
+    "jembatan garuda", "garuda bridge", "proyek jembatan garuda", "pembangunan jembatan garuda",
+    # TNI
+    "TNI", "oknum TNI", "prajurit tni", "tentara", "batalyon", "militer", "komandan", "TNI viral", "keluarga TNI", "persit", "kodam v/brawijaya", "kodam brawijaya",
+    # Politik & Korupsi
+    "korupsi", "pilkada", "politik", "suap",
+    # Demo & Konsolidasi
+    "demo", "unjuk rasa", "aksi damai", "konsolidasi", "protes",
+    # Bencana Alam
+    "bencana", "banjir", "longsor", "gempa", "kebakaran", "puting beliung",
+    # Narkoba
+    "narkoba", "sabu", "narkotika", "pengedar",
 ]
 
 REGIONS = [
@@ -24,7 +36,7 @@ REGIONS = [
     "Probolinggo", "Madiun", "Blitar", "Sampang", "Pamekasan",
     "Sumenep", "Bangkalan", "Bojonegoro", "Tuban", "Lamongan",
     "Jombang", "Nganjuk", "Trenggalek", "Tulungagung", "Ponorogo",
-    "Magetan", "Ngawi", "Pacitan", "Situbondo", "Bondowoso", "Jawa Timur",
+    "Magetan", "Ngawi", "Pacitan", "Situbondo", "Bondowoso",
 ]
 
 
@@ -112,24 +124,33 @@ async def crawl_and_enqueue(db: Session, queue: asyncio.Queue) -> dict:
 
     try:
         TOPIC_GROUPS = [
-            '("MBG" OR "makan bergizi gratis" OR TNI OR Polri)',
-            '(bencana OR banjir OR longsor OR gempa OR kebakaran OR kecelakaan)',
-            '(kriminal OR keamanan OR demo OR "unjuk rasa" OR konflik OR narkoba)',
-            '(korupsi OR pilkada OR politik)',
-            '(investasi OR infrastruktur OR jalan OR jembatan)'
+            # MBG
+            '("MBG" OR "makan bergizi gratis" OR "keracunan mbg" OR "SPPG")',
+            # KDMP (Koperasi Desa Merah Putih)
+            '("KDMP" OR "koperasi desa merah putih" OR "kopdes")',
+            # Jembatan Garuda
+            '("jembatan garuda" OR garuda bridge OR proyek jembatan garuda OR pembangunan jembatan garuda)',
+            # TNI
+            '(TNI OR tentara OR prajurit OR batalyon OR militer OR komandan OR oknum TNI OR TNI viral OR keluarga TNI OR persit OR kodam v/brawijaya)',
+            # Politik & Korupsi
+            '(korupsi OR pilkada OR politik OR suap)',
+            # Demo & Konsolidasi
+            '(demo OR unjuk rasa OR aksi damai OR konsolidasi OR protes)',
+            # Bencana Alam
+            '(bencana OR banjir OR longsor OR gempa OR kebakaran OR puting beliung)',
+            # Narkoba
+            '(narkoba OR sabu OR narkotika OR pengedar)',
         ]
 
         for region_name in REGIONS:
-            if region_name.lower() == "jawa timur":
-                continue  # Skip "Jawa Timur" global, fokus spesifik per kota/kab
                 
             for topic_group in TOPIC_GROUPS:
                 query = f"{topic_group} {region_name}"
                 logger.info(f"📍 Crawling: '{query}'")
                 articles = await loop.run_in_executor(_executor, _fetch_news_sync, query)
 
-                # Jeda antar topik agar tidak spam Google (dinaikkan menjadi 15 detik untuk menghindari rate limit)
-                await asyncio.sleep(15)
+                # Jeda antar topik — cukup 3 detik untuk hindari rate limit
+                await asyncio.sleep(3)
 
                 if not articles:
                     continue
@@ -211,9 +232,14 @@ async def crawl_and_enqueue(db: Session, queue: asyncio.Queue) -> dict:
 
     await queue.put(None)
 
+    # Hitung total berita negatif yang tersimpan dari sesi ini
+    from app.models import NewsAnalysis
+    total_neg = db.query(NewsAnalysis).filter(NewsAnalysis.sentiment == "negatif").count()
+
     log = CrawlLog(
         total_found=total_found,
         total_new=total_new,
+        total_neg=total_neg,
         status=status,
         error_msg=error_msg,
     )
